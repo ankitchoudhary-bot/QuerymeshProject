@@ -1,0 +1,127 @@
+# QueryMesh — local development stack.
+#
+# Services:
+#   opensearch — self-hosted, containerized (per rule: don't containerize
+#                external SaaS — but OpenSearch is self-hosted here)
+#   redis      — self-hosted, containerized
+#   querymesh  — the application (Gradio UI on :7860)
+#   airflow    — the ingestion DAG, in its OWN container with its OWN
+#                minimal dependency set (see querymesh/airflow/requirements.txt
+#                for why: real, verified conflicts between apache-airflow's
+#                pinned deps and querymesh's application stack). Docker's
+#                process isolation is exactly what makes this clean — no
+#                venv gymnastics needed, unlike running both on bare metal.
+#
+# NOT containerized (deliberately): Jina (embeddings API), Langfuse,
+# Logfire, arXiv — all external SaaS/hosted services, reached over the
+# network from `.env` configuration, per rule "do not unnecessarily
+# containerize external SaaS services."
+#
+# Usage:
+#   cp .env.example .env   # fill in LLM_API_KEY / JINA_API_KEY / etc.
+#   docker compose up
+
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: querymesh-opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.19.1
+    container_name: querymesh-opensearch-dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    restart: unless-stopped
+  
+  redis:
+    image: redis:7-alpine
+    container_name: querymesh-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  querymesh:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: querymesh-app
+    env_file:
+      - .env
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "7860:7860"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  airflow:
+    image: apache/airflow:2.10.5-python3.12
+    container_name: querymesh-airflow
+    # See querymesh/airflow/requirements.txt: this is the verified-minimal
+    # dependency set tasks.py actually needs — NOT `pip install -e
+    # /opt/querymesh`, which would pull in querymesh's full dependency
+    # list (logfire/langfuse/langgraph/fastmcp) and reproduce the exact
+    # conflict this separate container exists to avoid.
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - PYTHONPATH=/opt/querymesh
+      - _PIP_ADDITIONAL_REQUIREMENTS=pydantic pydantic-settings opensearch-py[async] python-dotenv
+    env_file:
+      - .env
+    volumes:
+      - ./querymesh/airflow/dags:/opt/airflow/dags:ro
+      - ./querymesh:/opt/querymesh/querymesh:ro
+      - airflow-data:/opt/airflow
+    ports:
+      - "8080:8080"
+    command: standalone
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  opensearch-data:
+  redis-data:
+  airflow-data:

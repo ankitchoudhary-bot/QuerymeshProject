@@ -1,0 +1,34 @@
+# Airflow runs in its OWN isolated environment — never installed into the
+# same venv as the main querymesh application.
+#
+# Why: Apache Airflow 2.10.5 pins older opentelemetry / typing-extensions /
+# cryptography than querymesh's application stack needs (pydantic 2.13,
+# logfire, langfuse, fastmcp all require newer versions). Installing both
+# into one environment DOES produce real conflicts — verified directly:
+# `pip install "apache-airflow==2.10.5" --constraint ...` into the main
+# querymesh venv silently downgrades opentelemetry-sdk 1.44->1.27,
+# typing-extensions 4.16->4.12, cryptography 50->42, httpx 0.28->0.27, and
+# pip then reports logfire/langfuse/pydantic/mcp as broken against those
+# downgraded versions.
+#
+# The fix (per project rule 49: "adapt the implementation, keep the
+# architecture stable") is Airflow in its own venv, per below. Do NOT
+# `pip install -e /path/to/querymesh` into that venv — that pulls in
+# querymesh's full dependency list (including logfire/langfuse/langgraph/
+# fastmcp), which is exactly the conflict above. `tasks.py` (the only file
+# the Airflow scheduler actually needs to import) has a much smaller real
+# dependency footprint than the whole package — verified working with:
+#
+#   python -m venv .venv-airflow && source .venv-airflow/bin/activate
+#   pip install "apache-airflow==2.10.5" \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.12.txt"
+#   pip install pydantic pydantic-settings "opensearch-py[async]" python-dotenv
+#   export PYTHONPATH=/path/to/querymesh   # repo root, NOT pip-installed
+#
+# `pip check` reports no conflicts with this combination, and
+# `python -c "import querymesh.airflow.dags.ingestion_dag"` succeeds,
+# confirmed against a real Airflow install (not just AST-parsed).
+#
+# Then point AIRFLOW_HOME's dags_folder at querymesh/airflow/dags/.
+
+apache-airflow==2.10.5
